@@ -1,0 +1,33 @@
+[project]
+name = "pgsql-export"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pandas>=2.3.2",
+    "psycopg2-binary>=2.9.10",
+    "python-dotenv>=1.1.1",
+    "xlsxwriter>=3.2.5",
+]
+
+[project.scripts]
+pgsql-export = "pgsql_export.cli:main"
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11.0",
+    "types-psycopg2>=2.9.21.20240819",
+    "pandas-stubs>=2.2.2.240807",
+]
+
+[tool.mypy]
+python_version = "3.13"
+strict = false
+warn_unused_ignores = true
+pretty = true
+show_error_codes = true
+
