@@ -1,7 +1,7 @@
 [project]
 name = "pgsql-export"
 version = "0.1.0"
-description = "Add your description here"
+description = "Export PostgreSQL schema metadata to a formatted Excel workbook"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -30,4 +30,3 @@ strict = false
 warn_unused_ignores = true
 pretty = true
 show_error_codes = true
-

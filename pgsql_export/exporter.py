@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+from psycopg2 import sql
 
 
 TABLES_SQL = """
@@ -14,7 +15,8 @@ SELECT
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r','p')
-  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname !~ '^pg_'
+  AND n.nspname <> 'information_schema'
 ORDER BY 1,2;
 """
 
@@ -35,7 +37,8 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
 WHERE a.attnum > 0 AND NOT a.attisdropped
   AND c.relkind IN ('r','p')
-  AND n.nspname NOT IN ('pg_catalog','information_schema')
+  AND n.nspname !~ '^pg_'
+  AND n.nspname <> 'information_schema'
 ORDER BY 1,2,a.attnum;
 """
 
@@ -47,7 +50,8 @@ WITH cons AS (
   FROM pg_constraint con
   JOIN pg_class c ON c.oid = con.conrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+  WHERE n.nspname !~ '^pg_'
+    AND n.nspname <> 'information_schema'
 )
 SELECT
   "schema", "table", constraint_name,
@@ -77,7 +81,8 @@ JOIN pg_class idx ON idx.oid = ix.indexrelid
 JOIN pg_class tbl ON tbl.oid = ix.indrelid
 JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
 JOIN pg_am am ON am.oid = idx.relam
-WHERE ns.nspname NOT IN ('pg_catalog','information_schema')
+WHERE ns.nspname !~ '^pg_'
+  AND ns.nspname <> 'information_schema'
 ORDER BY 1,2,3;
 """
 
@@ -87,7 +92,11 @@ SELECT
   tbl.relname AS table,
   tg.tgname  AS trigger_name,
   CONCAT(
-    CASE WHEN (tg.tgtype & 1)<>0 THEN 'BEFORE ' ELSE 'AFTER ' END,
+    CASE
+      WHEN (tg.tgtype & 64) <> 0 THEN 'INSTEAD OF '
+      WHEN (tg.tgtype & 2) <> 0 THEN 'BEFORE '
+      ELSE 'AFTER '
+    END,
     CASE WHEN (tg.tgtype &  4)<>0 THEN 'INSERT ' ELSE '' END,
     CASE WHEN (tg.tgtype &  8)<>0 THEN 'DELETE ' ELSE '' END,
     CASE WHEN (tg.tgtype & 16)<>0 THEN 'UPDATE ' ELSE '' END,
@@ -100,7 +109,8 @@ JOIN pg_class tbl ON tbl.oid = tg.tgrelid
 JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
 JOIN pg_proc p ON p.oid = tg.tgfoid
 WHERE NOT tg.tgisinternal
-  AND ns.nspname NOT IN ('pg_catalog','information_schema')
+  AND ns.nspname !~ '^pg_'
+  AND ns.nspname <> 'information_schema'
 ORDER BY 1,2,3;
 """
 
@@ -115,7 +125,8 @@ SELECT
   obj_description(p.oid, 'pg_proc') AS comment
 FROM pg_proc p
 JOIN pg_namespace ns ON ns.oid = p.pronamespace
-WHERE ns.nspname NOT IN ('pg_catalog','information_schema')
+WHERE ns.nspname !~ '^pg_'
+  AND ns.nspname <> 'information_schema'
 ORDER BY 1,2;
 """
 
@@ -128,7 +139,8 @@ SELECT
 FROM pg_class c
 JOIN pg_namespace ns ON ns.oid = c.relnamespace
 WHERE c.relkind = 'v'
-  AND ns.nspname NOT IN ('pg_catalog','information_schema')
+  AND ns.nspname !~ '^pg_'
+  AND ns.nspname <> 'information_schema'
 ORDER BY 1,2;
 """
 
@@ -155,6 +167,21 @@ def _auto_width(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame, wrap_
     ws.autofilter(0, 0, max(0, len(df)), max(0, len(df.columns) - 1))
 
 
+def _fetch_row_counts(conn: psycopg2.extensions.connection, tables: pd.DataFrame) -> list[int]:
+    counts: list[int] = []
+    with conn.cursor() as cur:
+        for _, row in tables.iterrows():
+            query = sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                sql.Identifier(row["schema"]),
+                sql.Identifier(row["table"]),
+            )
+            cur.execute(query)
+            # COUNT(*) always returns one row, but keep a defensive fallback.
+            result = cur.fetchone()
+            counts.append(0 if result is None else result[0])
+    return counts
+
+
 def write_excel(conn: psycopg2.extensions.connection, out_path: str, with_counts: bool = False):
     tables = fetch_df(conn, TABLES_SQL)
     cols = fetch_df(conn, COLUMNS_SQL)
@@ -165,22 +192,18 @@ def write_excel(conn: psycopg2.extensions.connection, out_path: str, with_counts
     views = fetch_df(conn, VIEWS_SQL)
 
     if with_counts and not tables.empty:
-        counts = []
-        with conn.cursor() as cur:
-            for _, r in tables.iterrows():
-                schema = r["schema"]
-                table = r["table"]
-                cur.execute(f'SELECT COUNT(*) FROM "{schema}"."{table}"')
-                # psycopg2's fetchone() returns tuple[Any, ...] | None per stubs.
-                # COUNT(*) always returns a row, but guard for mypy and safety.
-                row = cur.fetchone()
-                if row is None:
-                    counts.append(0)
-                else:
-                    counts.append(row[0])
-        tables.insert(3, "row_count", counts)
+        tables.insert(3, "row_count", _fetch_row_counts(conn, tables))
 
-    with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(
+        out_path,
+        engine="xlsxwriter",
+        engine_kwargs={
+            "options": {
+                "strings_to_formulas": False,
+                "strings_to_urls": False,
+            }
+        },
+    ) as writer:
         def write_sheet(name: str, df: pd.DataFrame, wrap_cols=None, order=None):
             if df is None or df.empty:
                 view_df = pd.DataFrame({"info": ["(no rows)"]})
